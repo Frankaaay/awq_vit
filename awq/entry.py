@@ -137,6 +137,15 @@ def build_model_and_enc(model_path, dtype):
             device="cpu",
             **{"use_cache": False},
         )
+    elif "vit" in model_path.lower():
+        # NEW: ViT branch
+        from transformers import AutoModelForImageClassification, AutoImageProcessor
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        config.use_cache = False
+        model = AutoModelForImageClassification.from_pretrained(
+            model_path, config=config, trust_remote_code=True, torch_dtype=torch_dtype, low_cpu_mem_usage=True
+        )
+        enc = AutoImageProcessor.from_pretrained(model_path)
     else:
         config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         # Note (Haotian): To avoid OOM after huggingface transformers 4.36.2
@@ -206,7 +215,11 @@ def build_model_and_enc(model_path, dtype):
                 w_bit=args.w_bit,
                 q_config=q_config,
                 n_samples=128,
-                seqlen=512,
+                # seqlen=512,
+                seqlen=224,  # or image size
+                calib_data="imagefolder",
+                image_dataset_name="cifar10",  # or another dataset
+                image_processor=enc,
             )
             if args.dump_awq:
                 dirpath = os.path.dirname(args.dump_awq)
@@ -351,6 +364,19 @@ def main():
             results["config"]["model"] = args.model_path
             with open(args.output_path, "w") as f:
                 json.dump(results, f, indent=2)
+    elif "vit" in args.model_path.lower():
+        # ViT evaluation branch
+        from PIL import Image
+        # Example: load a test image and run inference
+        image = Image.open("test.jpg")
+        inputs = enc(images=image, return_tensors="pt")
+        outputs = model(**inputs)
+        print("ViT logits:", outputs.logits)
+        # Optionally, print top-1 prediction
+        pred = outputs.logits.argmax(-1).item()
+        print("Predicted class:", pred)
+    else:
+        print("No evaluation task specified and not a ViT model.")
 
 
 if __name__ == "__main__":

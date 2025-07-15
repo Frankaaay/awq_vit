@@ -42,6 +42,9 @@ def get_blocks(model):
         layers = model.gpt_neox.layers
     elif model.__class__.__name__ == "LlavaLlamaModel":
         layers = model.llm.model.layers
+    elif model.__class__.__name__ in ("ViTModel", "ViTForImageClassification"):
+        # HuggingFace ViT models
+        layers = model.encoder.layer
     else:
         raise NotImplementedError(type(model))
     return layers
@@ -79,6 +82,9 @@ def move_embed(model, device):
         model.embed_out = model.embed_out.to(device)
     elif "llavallamamodel" in str(model.__class__).lower():
         model.llm.model.embed_tokens = model.llm.model.embed_tokens.to(device)
+    elif model.__class__.__name__ in ("ViTModel", "ViTForImageClassification"):
+        # Move patch and positional embeddings to device
+        model.embeddings.to(device)
     else:
         raise NotImplementedError(type(model))
 

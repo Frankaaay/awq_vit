@@ -440,6 +440,36 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
                 inp=input_feat["mlp.dense_4h_to_h"],
             )
         )
+    elif "vit" in str(type(module)).lower():
+        # Example for HuggingFace ViT
+        # Attention input
+        scales_list.append(
+            _auto_get_scale(
+                prev_op=module.layernorm_before,
+                layers=[module.attention.attention.query, module.attention.attention.key, module.attention.attention.value],
+                inp=input_feat["attention.attention.query"],
+                module2inspect=module.attention,
+                kwargs=module_kwargs,
+            )
+        )
+        # MLP input
+        scales_list.append(
+            _auto_get_scale(
+                prev_op=module.layernorm_after,
+                layers=[module.intermediate.dense],
+                inp=input_feat["intermediate.dense"],
+                module2inspect=module.intermediate,
+            )
+        )
+        # MLP output
+        scales_list.append(
+            _auto_get_scale(
+                prev_op=module.intermediate.dense,
+                layers=[module.output.dense],
+                inp=input_feat["output.dense"],
+            )
+        )
+
     else:
         raise NotImplementedError(f"{type(module)} not supported yet!")
 
