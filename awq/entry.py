@@ -146,6 +146,7 @@ def build_model_and_enc(model_path, dtype):
             model_path, config=config, trust_remote_code=True, torch_dtype=torch_dtype, low_cpu_mem_usage=True
         )
         enc = AutoImageProcessor.from_pretrained(model_path)
+        print("Vit is loaded with image processor")
     else:
         config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         # Note (Haotian): To avoid OOM after huggingface transformers 4.36.2
@@ -199,38 +200,69 @@ def build_model_and_enc(model_path, dtype):
         args.run_awq &= not args.load_awq  # if load_awq, no need to run awq
         # Init model on CPU:
         kwargs = {"torch_dtype": torch_dtype, "low_cpu_mem_usage": True}
-        if not vila_10_quant_mode:
+        if vila_10_quant_mode:
+            # model = AutoModelForCausalLM.from_pretrained(
+            #     model_path, config=config, trust_remote_code=True, **kwargs
+            # )
+            pass
+        elif "vit" in model_path.lower():
+            # model already loaded above
+            pass
+        else:
             model = AutoModelForCausalLM.from_pretrained(
                 model_path, config=config, trust_remote_code=True, **kwargs
             )
 
         model.eval()
 
-        if args.run_awq:
-            assert args.dump_awq, "Please save the awq results with --dump_awq"
+        # if args.run_awq:
+        #     assert args.dump_awq, "Please save the awq results with --dump_awq"
 
+        #     awq_results = run_awq(
+        #         model,
+        #         enc,
+        #         w_bit=args.w_bit,
+        #         q_config=q_config,
+        #         n_samples=128,
+        #         # seqlen=512,
+        #         seqlen=224,  # or image size
+        #         calib_data="imagefolder",
+        #         image_dataset_name="cifar10",  # or another dataset
+        #         image_processor=enc,
+        #     )
+        #     if args.dump_awq:
+        #         dirpath = os.path.dirname(args.dump_awq)
+        #         os.makedirs(dirpath, exist_ok=True)
+
+        #         torch.save(awq_results, args.dump_awq)
+        #         print("AWQ results saved at", args.dump_awq)
+
+        #     exit(0)
+
+        # if args.load_awq:
+        #     print("Loading pre-computed AWQ results from", args.load_awq)
+        #     awq_results = torch.load(args.load_awq, map_location="cpu")
+        #     apply_awq(model, awq_results)
+        if args.run_awq:
+            # Combine AWQ search and apply in one step
+            print("Running AWQ search and applying results in-memory...")
             awq_results = run_awq(
                 model,
                 enc,
                 w_bit=args.w_bit,
                 q_config=q_config,
                 n_samples=128,
-                # seqlen=512,
                 seqlen=224,  # or image size
                 calib_data="imagefolder",
                 image_dataset_name="cifar10",  # or another dataset
                 image_processor=enc,
             )
-            if args.dump_awq:
-                dirpath = os.path.dirname(args.dump_awq)
-                os.makedirs(dirpath, exist_ok=True)
+            print("AWQ search complete, applying results...")
+            apply_awq(model, awq_results)
+            print("AWQ search and application complete.")
+            # Do NOT save or exit here; continue to quantization below
 
-                torch.save(awq_results, args.dump_awq)
-                print("AWQ results saved at", args.dump_awq)
-
-            exit(0)
-
-        if args.load_awq:
+        elif args.load_awq:
             print("Loading pre-computed AWQ results from", args.load_awq)
             awq_results = torch.load(args.load_awq, map_location="cpu")
             apply_awq(model, awq_results)
@@ -244,6 +276,7 @@ def build_model_and_enc(model_path, dtype):
                 pseudo_quantize_model_weight(model, w_bit=args.w_bit, q_config=q_config)
                 if args.dump_fake:
                     model.save_pretrained(args.dump_fake)
+                    enc.save_pretrained(args.dump_fake)
                     print("Pseudo-quantized models saved at", args.dump_fake)
             elif args.q_backend == "real":  # real quantization
                 real_quantize_model_weight(model, w_bit=args.w_bit, q_config=q_config)
@@ -365,16 +398,17 @@ def main():
             with open(args.output_path, "w") as f:
                 json.dump(results, f, indent=2)
     elif "vit" in args.model_path.lower():
-        # ViT evaluation branch
-        from PIL import Image
-        # Example: load a test image and run inference
-        image = Image.open("test.jpg")
-        inputs = enc(images=image, return_tensors="pt")
-        outputs = model(**inputs)
-        print("ViT logits:", outputs.logits)
-        # Optionally, print top-1 prediction
-        pred = outputs.logits.argmax(-1).item()
-        print("Predicted class:", pred)
+        pass
+        # # ViT evaluation branch
+        # from PIL import Image
+        # # Example: load a test image and run inference
+        # image = Image.open("test.jpg")
+        # inputs = enc(images=image, return_tensors="pt")
+        # outputs = model(**inputs)
+        # print("ViT logits:", outputs.logits)
+        # # Optionally, print top-1 prediction
+        # pred = outputs.logits.argmax(-1).item()
+        # print("Predicted class:", pred)
     else:
         print("No evaluation task specified and not a ViT model.")
 

@@ -9,7 +9,6 @@ def get_calib_dataset(
     block_size=512,
     image_dataset_name=None,
     image_processor=None,
-    image_size=224,
     batch_size=32,
     image_split="train",
 ):

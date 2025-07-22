@@ -42,9 +42,15 @@ def get_blocks(model):
         layers = model.gpt_neox.layers
     elif model.__class__.__name__ == "LlavaLlamaModel":
         layers = model.llm.model.layers
-    elif model.__class__.__name__ in ("ViTModel", "ViTForImageClassification"):
-        # HuggingFace ViT models
+    elif model.__class__.__name__ == "ViTForImageClassification":
+        # HuggingFace ViTForImageClassification models
+        layers = model.vit.encoder.layer
+    elif model.__class__.__name__ == "ViTModel":
+        # HuggingFace ViTModel
         layers = model.encoder.layer
+    elif model.__class__.__name__ == "SwinForImageClassification":
+        # For HuggingFace Swin, the encoder blocks are here:
+        layers = model.swin.encoder.layers
     else:
         raise NotImplementedError(type(model))
     return layers
@@ -54,9 +60,9 @@ def move_embed(model, device):
     if isinstance(model, (LlamaForCausalLM, Qwen2ForCausalLM)):
         model.model.embed_tokens = model.model.embed_tokens.to(device)
         model.model.rotary_emb = model.model.rotary_emb.to(device)
-    elif isinstance(model, LlavaLlamaForCausalLM):
-        model.model.embed_tokens = model.model.embed_tokens.to(device)
-        model.model.vision_tower.vision_tower.vision_model.embeddings.to(device)
+    # elif isinstance(model, LlavaLlamaForCausalLM):
+    #     model.model.embed_tokens = model.model.embed_tokens.to(device)
+    #     model.model.vision_tower.vision_tower.vision_model.embeddings.to(device)
     elif isinstance(model, OPTForCausalLM):
         model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(device)
         model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(
@@ -82,9 +88,13 @@ def move_embed(model, device):
         model.embed_out = model.embed_out.to(device)
     elif "llavallamamodel" in str(model.__class__).lower():
         model.llm.model.embed_tokens = model.llm.model.embed_tokens.to(device)
-    elif model.__class__.__name__ in ("ViTModel", "ViTForImageClassification"):
+    elif model.__class__.__name__ == "ViTForImageClassification":
         # Move patch and positional embeddings to device
+        model.vit.embeddings.to(device)
+    elif model.__class__.__name__ == "ViTModel":
         model.embeddings.to(device)
+    elif model.__class__.__name__ == "SwinForImageClassification":
+        model.swin.embeddings.to(device)
     else:
         raise NotImplementedError(type(model))
 
@@ -101,6 +111,10 @@ def run_awq(
     mse_range=True,
     # some configs for ablation study
     calib_data="pileval",
+    image_dataset_name=None,      # <-- add this
+    image_processor=None,         # <-- add this
+    batch_size=32,                # <-- optional: add batch_size for images
+    image_split="train",
 ):
     from ..utils.calib_data import get_calib_dataset
     from ..utils.module import append_str_prefix, get_op_name
@@ -112,7 +126,14 @@ def run_awq(
     layers = get_blocks(model)
 
     samples = get_calib_dataset(
-        data=calib_data, tokenizer=enc, n_samples=n_samples, block_size=seqlen
+        data=calib_data,
+        tokenizer=enc,
+        n_samples=n_samples,
+        block_size=seqlen,
+        image_dataset_name=image_dataset_name,
+        image_processor=image_processor,
+        batch_size=batch_size,
+        image_split=image_split,
     )
     samples = torch.cat(samples, dim=0)
 
@@ -125,23 +146,37 @@ def run_awq(
     # get input and kwargs to layer 0
     # with_kwargs is only supported in PyTorch 2.0
     # use this Catcher hack for now
+    # class Catcher(nn.Module):
+    #     def __init__(self, module):
+    #         super().__init__()
+    #         self.module = module
+
+    #     def forward(self, inp, **kwargs):
+    #         inps.append(inp)
+    #         layer_kwargs.update(kwargs)
+    #         raise ValueError  # early exit to break later inference
     class Catcher(nn.Module):
         def __init__(self, module):
             super().__init__()
             self.module = module
 
-        def forward(self, inp, **kwargs):
-            inps.append(inp)
+        def forward(self, *args, **kwargs):
+            inps.append(args[0])
             layer_kwargs.update(kwargs)
+            # For Swin, also capture input_dimensions if present
+            if "input_dimensions" in kwargs:
+                layer_kwargs["input_dimensions"] = kwargs["input_dimensions"]
             raise ValueError  # early exit to break later inference
 
     # patch layer 0 to catch input and kwargs
     layers[0] = Catcher(layers[0])
     try:
+        device = next(model.parameters()).device
+        dtype = next(model.parameters()).dtype
         if model.__class__.__name__ == "LlavaLlamaModel":
-            model.llm(samples.to(next(model.parameters()).device))
+            model.llm(samples.to(device=device, dtype=dtype))
         else:
-            model(samples.to(next(model.parameters()).device))
+            model(samples.to(device=device, dtype=dtype))
     except ValueError:  # work with early exit
         pass
     del samples
@@ -181,7 +216,18 @@ def run_awq(
             )
         inps = inps.to(next(layer.parameters()).device)  # in case multi-gpu
         # get output as next layer's input
-        inps = layer(inps, **layer_kwargs)[0]
+        if model.__class__.__name__ == "SwinForImageClassification":
+            if "input_dimensions" not in layer_kwargs:
+                raise RuntimeError("input_dimensions missing for Swin block")
+            # Swin blocks may change spatial size, so get new input_dimensions if returned
+            out = layer(inps, input_dimensions=layer_kwargs["input_dimensions"])
+            if isinstance(out, tuple):
+                inps, new_input_dimensions = out
+                layer_kwargs["input_dimensions"] = new_input_dimensions
+            else:
+                inps = out
+        else:
+            inps = layer(inps, **layer_kwargs)[0]
         for h in handles:
             h.remove()
         # now solve for scaling and clipping
